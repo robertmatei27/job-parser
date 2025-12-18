@@ -1,0 +1,288 @@
+import csv
+import json
+import argparse
+import re
+import html
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+
+def normalize_header(h: str) -> str:
+	return (h or "").strip().lower()
+
+
+def map_columns(fieldnames: List[str]) -> Dict[str, str]:
+	"""Map messy CSV headers to our expected keys."""
+	mapping = {}
+	for h in fieldnames:
+		nh = normalize_header(h)
+		# job URL should not be treated as title
+		if "url" in nh:
+			mapping["job_url"] = h
+			continue
+		# job description HTML should not be treated as a title either
+		if "description" in nh and "html" in nh:
+			# e.g. "Job_Description_HTML"
+			mapping["job_description_html"] = h
+			continue
+		# prefer explicit "job title" column for job_title
+		if nh in ("job title", "job_title", "title"):
+			mapping["job_title"] = h
+		elif any(k in nh for k in ("title", "position")):
+			# only set if not already mapped by a more explicit header
+			mapping.setdefault("job_title", h)
+		elif "location" in nh or "city" in nh:
+			mapping["location"] = h
+		elif "date" in nh or "posted" in nh or "published" in nh:
+			mapping["posted_date"] = h
+		elif "salary" in nh or "pay" in nh or "compensation" in nh:
+			mapping["salary"] = h
+		elif any(k in nh for k in ("tech", "stack", "skills", "technologies")):
+			mapping["tech_stack"] = h
+	return mapping
+
+
+def parse_tech_stack(s: Optional[str]) -> List[str]:
+	if not s:
+		return []
+	# Try to focus on the part after "experience with", which usually lists skills
+	m = re.search(r"experience with([^\.]+)", s, re.IGNORECASE)
+	segment = m.group(1) if m else s
+	parts = re.split(r"[,/]| and ", segment)
+	skills: List[str] = []
+	for p in parts:
+		p = p.strip(" .;:!?\n\t")
+		if not p:
+			continue
+		# remove leading helper phrases
+		p = re.sub(r"^(experience with|you should have|should have)\s+", "", p, flags=re.IGNORECASE)
+		if not p:
+			continue
+		skills.append(p)
+	# de‑duplicate while preserving order
+	seen = set()
+	result: List[str] = []
+	for sk in skills:
+		key = sk.lower()
+		if key in seen:
+			continue
+		seen.add(key)
+		result.append(sk)
+	return result
+
+
+def extract_salary_phrase(s: str) -> str:
+	"""Try to extract just the salary-related phrase from a longer text snippet."""
+	text = s.strip()
+	if not text:
+		return ""
+	# If it's already short, assume it's just the salary blob
+	if len(text) <= 120:
+		return text
+
+	# Look for sentences/fragments mentioning salary-related words
+	m = re.search(
+		r"(salary[^\.!\n]*|compensation[^\.!\n]*|package[^\.!\n]*|rate[^\.!\n]*|pay[^\.!\n]*):?\s*[^\.!\n]+",
+		text,
+		re.IGNORECASE,
+	)
+	if m:
+		return m.group(0).strip(" .")
+
+	# Look for a money range or value, optionally with unit
+	m2 = re.search(
+		r"[\$€£]?\s?\d[\d,]*(?:\.\d+)?k?(?:\s*[-–]\s*[\$€£]?\s?\d[\d,]*(?:\.\d+)?k?)?(?:\s*(?:USD|GBP|EUR))?(?:\s*(?:per\s*(?:hour|day|week|month|year)|/hr|/hour|/day|/week|/month|/year|hr|hourly))?",
+		text,
+		re.IGNORECASE,
+	)
+	if m2:
+		return m2.group(0).strip(" .")
+
+	# Handle textual descriptors like "Competitive"
+	m3 = re.search(r"\b(competitive|doe)\b", text, re.IGNORECASE)
+	if m3:
+		return m3.group(1)
+
+	# Fallback: return the original, but trimmed
+	return text
+
+
+def parse_salary(s: Optional[str]) -> Dict[str, Any]:
+	"""Parse salary text into structured fields for display and filtering."""
+	out: Dict[str, Any] = {
+		"display": s or "",
+		"min_amount": None,
+		"max_amount": None,
+		"currency_code": None,
+		"currency_symbol": None,
+		"period": None,
+	}
+	if not s:
+		# If we have no salary text at all, return all blanks
+		out["display"] = ""
+		out["min_amount"] = ""
+		out["max_amount"] = ""
+		out["currency_code"] = ""
+		out["currency_symbol"] = ""
+		out["period"] = ""
+		return out
+	orig = s.strip()
+	snippet = extract_salary_phrase(orig) or orig
+	out["display"] = snippet
+	text_lower = snippet.lower()
+
+	# currency (normalized to 3-letter codes) + symbol
+	cur_match = re.search(r"(\$|€|£|usd|gbp|eur)", snippet, re.IGNORECASE)
+	if cur_match:
+		cur_raw = cur_match.group(1).lower()
+		if cur_raw in ("$", "usd"):
+			out["currency_code"] = "USD"
+			out["currency_symbol"] = "$"
+		elif cur_raw in ("£", "gbp"):
+			out["currency_code"] = "GBP"
+			out["currency_symbol"] = "£"
+		elif cur_raw in ("€", "eur"):
+			out["currency_code"] = "EUR"
+			out["currency_symbol"] = "€"
+
+	# period (hour/day/week/month/year)
+	period: Optional[str] = None
+	if re.search(r"(per\s*hour|/hour|/hr|\shr\b|hourly)", text_lower):
+		period = "hour"
+	elif re.search(r"(per\s*day|/day|daily|day rate|daily rate)", text_lower):
+		period = "day"
+	elif re.search(r"(per\s*week|/week|weekly)", text_lower):
+		period = "week"
+	elif re.search(r"(per\s*month|/month|monthly|/mo\b)", text_lower):
+		period = "month"
+	elif re.search(r"(per\s*year|/year|annum|annual|yearly|\byr\b|\bpa\b|\bsalary\b|\bbase\b)", text_lower):
+		period = "year"
+	# Heuristic: ranges or single values in thousands, with no explicit shorter unit, are likely yearly
+	if not period and re.search(r"\d+\s*k\b", text_lower):
+		period = "year"
+	out["period"] = period
+
+	# normalize k suffix (e.g., 50k -> 50000)
+	def _num_from_token(tok: str) -> Optional[float]:
+		tok = tok.replace(',', '').strip()
+		m = re.match(r"^(\d+(?:\.\d+)?)(k)?$", tok, re.IGNORECASE)
+		if not m:
+			return None
+		val = float(m.group(1))
+		if m.group(2):
+			val *= 1000
+		return val
+
+	# find numeric tokens
+	tokens = re.findall(r"\d+[\d,]*(?:\.\d+)?k?", snippet, re.IGNORECASE)
+	nums = [_num_from_token(t) for t in tokens]
+	nums = [n for n in nums if n is not None]
+	if len(nums) == 1:
+		out["min_amount"] = out["max_amount"] = int(nums[0])
+	elif len(nums) >= 2:
+		out["min_amount"] = int(min(nums))
+		out["max_amount"] = int(max(nums))
+
+	# Refine display to drop leading labels like "Daily rate:" or "Compensation:"
+	if out["display"]:
+		raw_txt = out["display"].strip()
+		m_lead = re.search(r"[\$€£]|\d", raw_txt)
+		if m_lead and m_lead.start() > 0:
+			raw_txt = raw_txt[m_lead.start() :].lstrip()
+		out["display"] = raw_txt
+
+	# If we couldn't extract any structured info, clear display as well
+	if (
+		out["min_amount"] is None
+		and out["max_amount"] is None
+		and out["currency_code"] is None
+		and out["period"] is None
+	):
+		out["display"] = ""
+
+	# Normalise period capitalisation (e.g. "year" -> "Year")
+	if out["period"] not in (None, ""):
+		out["period"] = str(out["period"]).capitalize()
+
+	# If display is blank, normalise all other fields to blank strings instead of null
+	if out["display"] == "":
+		out["min_amount"] = ""
+		out["max_amount"] = ""
+		out["currency_code"] = ""
+		out["currency_symbol"] = ""
+		out["period"] = ""
+
+	return out
+
+
+def clean_html_description(s: Optional[str]) -> str:
+	if not s:
+		return ""
+	# Strip HTML tags
+	text = re.sub(r"<[^>]+>", " ", s)
+	# Decode HTML entities
+	text = html.unescape(text)
+	# Replace standalone ampersands with a space
+	text = text.replace("&", " ")
+	# Normalise whitespace
+	text = re.sub(r"\s+", " ", text)
+	return text.strip()
+
+
+def row_to_job(row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, Any]:
+	job = {}
+	job["job_title"] = row.get(mapping.get("job_title", ""), "").strip()
+	location_raw = row.get(mapping.get("location", ""), "").strip()
+	posted_raw = row.get(mapping.get("posted_date", ""), "").strip()
+	# Store posted date as the original raw string only
+	job["posted_date"] = posted_raw
+	desc_html = row.get(mapping.get("job_description_html", ""), "")
+	job["job_description"] = clean_html_description(desc_html)
+
+	# Normalise obviously invalid/placeholder locations to "N/A"
+	if not location_raw or re.fullmatch(
+		r"(?i)\s*(see\s+job\s+desc\.?|see\s+job\s+description\.?|n/?a|na)\s*", location_raw
+	):
+		location_raw = "N/A"
+
+	job["location"] = location_raw
+	# Use explicit salary column if present and not just "Competitive", otherwise infer from description
+	salary_raw = row.get(mapping.get("salary", ""), "").strip()
+	if salary_raw and not re.search(r"\bcompetitive\b", salary_raw, re.IGNORECASE):
+		salary_source = salary_raw
+	else:
+		salary_source = job["job_description"]
+	job["salary"] = parse_salary(salary_source)
+	# Prefer explicit tech/skills column if present, otherwise derive from description
+	tech_raw = row.get(mapping.get("tech_stack", ""), "").strip()
+	source_for_tech = tech_raw if tech_raw else job["job_description"]
+	job["tech_stack"] = parse_tech_stack(source_for_tech)
+	job["original_row"] = row
+	return job
+
+
+def convert_csv_to_json(inpath: str, outpath: str) -> None:
+	with open(inpath, newline='', encoding='utf-8') as f:
+		reader = csv.DictReader(f)
+		fieldnames = reader.fieldnames or []
+		mapping = map_columns(fieldnames)
+		jobs = []
+		for row in reader:
+			jobs.append(row_to_job(row, mapping))
+
+	with open(outpath, 'w', encoding='utf-8') as fo:
+		json.dump(jobs, fo, ensure_ascii=False, indent=2)
+
+
+def main():
+	parser = argparse.ArgumentParser(description='Convert jobs CSV to structured JSON')
+	parser.add_argument('input_csv', help='Path to input CSV file')
+	parser.add_argument('output_json', nargs='?', default='jobs.json', help='Path to output JSON file (default: jobs.json)')
+	args = parser.parse_args()
+	convert_csv_to_json(args.input_csv, args.output_json)
+	print(f'Wrote structured JSON to {args.output_json}')
+
+
+if __name__ == '__main__':
+	main()
+
