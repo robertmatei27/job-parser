@@ -130,7 +130,12 @@ def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 	if not s:
 		return out
 	orig = s.strip()
-	snippet = extract_salary_phrase(orig) or orig
+	snippet = extract_salary_phrase(orig)
+	
+	# If extract_salary_phrase returns empty, no clear salary found - return all nulls
+	if not snippet:
+		return out
+	
 	text_lower = snippet.lower()
 
 	# Check for clear salary indicators - require at least one of: currency, period, or salary keywords
@@ -201,7 +206,8 @@ def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 		m_lead = re.search(r"[\$€£]|\d", raw_txt)
 		if m_lead and m_lead.start() > 0:
 			raw_txt = raw_txt[m_lead.start() :].lstrip()
-		out["display"] = raw_txt
+		# If display becomes empty after refinement, set to None
+		out["display"] = raw_txt if raw_txt else None
 
 	# If we couldn't extract any structured info, clear display as well
 	if (
