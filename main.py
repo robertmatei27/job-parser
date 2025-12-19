@@ -3,7 +3,7 @@ import json
 import argparse
 import re
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 
@@ -110,7 +110,7 @@ def extract_salary_phrase(s: str) -> str:
 def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 	"""Parse salary text into structured fields for display and filtering."""
 	out: Dict[str, Any] = {
-		"display": s or "",
+		"display": None,
 		"min_amount": None,
 		"max_amount": None,
 		"currency_code": None,
@@ -118,13 +118,6 @@ def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 		"period": None,
 	}
 	if not s:
-		# If we have no salary text at all, return all blanks
-		out["display"] = ""
-		out["min_amount"] = ""
-		out["max_amount"] = ""
-		out["currency_code"] = ""
-		out["currency_symbol"] = ""
-		out["period"] = ""
 		return out
 	orig = s.strip()
 	snippet = extract_salary_phrase(orig) or orig
@@ -198,19 +191,11 @@ def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 		and out["currency_code"] is None
 		and out["period"] is None
 	):
-		out["display"] = ""
+		out["display"] = None
 
 	# Normalise period capitalisation (e.g. "year" -> "Year")
-	if out["period"] not in (None, ""):
+	if out["period"] is not None:
 		out["period"] = str(out["period"]).capitalize()
-
-	# If display is blank, normalise all other fields to blank strings instead of null
-	if out["display"] == "":
-		out["min_amount"] = ""
-		out["max_amount"] = ""
-		out["currency_code"] = ""
-		out["currency_symbol"] = ""
-		out["period"] = ""
 
 	return out
 
@@ -229,23 +214,79 @@ def clean_html_description(s: Optional[str]) -> str:
 	return text.strip()
 
 
+def parse_posted_date(s: Optional[str]) -> Optional[str]:
+	if not s:
+		return None
+	text = s.strip()
+	if not text:
+		return None
+
+	# First try standard absolute date formats
+	for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+		try:
+			d = datetime.strptime(text, fmt).date()
+			return d.isoformat()
+		except ValueError:
+			pass
+
+	lower = text.lower()
+	today = datetime.today().date()
+
+	# Relative phrases
+	if lower in ("today", "just now"):
+		return today.isoformat()
+	if lower == "yesterday":
+		return (today - timedelta(days=1)).isoformat()
+
+	m = re.match(r"^\s*(\d+)\s+day[s]?\s+ago\s*$", lower)
+	if m:
+		days = int(m.group(1))
+		return (today - timedelta(days=days)).isoformat()
+
+	m = re.match(r"^\s*(\d+)\s+week[s]?\s+ago\s*$", lower)
+	if m:
+		weeks = int(m.group(1))
+		return (today - timedelta(days=7 * weeks)).isoformat()
+
+	m = re.match(r"^\s*(\d+)\s+month[s]?\s+ago\s*$", lower)
+	if m:
+		months = int(m.group(1))
+		# Approximate a month as 30 days
+		return (today - timedelta(days=30 * months)).isoformat()
+
+	m = re.match(r"^\s*(\d+)\s+year[s]?\s+ago\s*$", lower)
+	if m:
+		years = int(m.group(1))
+		return (today - timedelta(days=365 * years)).isoformat()
+
+	# Things like "3 hours ago", "45 minutes ago" -> treat as today
+	if re.search(r"\bhour[s]?\s+ago\b", lower) or re.search(r"\bminute[s]?\s+ago\b", lower):
+		return today.isoformat()
+
+	# If nothing matches, treat as invalid and return None
+	return None
+
+
 def row_to_job(row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, Any]:
 	job = {}
 	job["job_title"] = row.get(mapping.get("job_title", ""), "").strip()
 	location_raw = row.get(mapping.get("location", ""), "").strip()
 	posted_raw = row.get(mapping.get("posted_date", ""), "").strip()
-	# Store posted date as the original raw string only
-	job["posted_date"] = posted_raw
+	job["job_url"] = row.get(mapping.get("job_url", ""), "").strip() or None
+	# Normalise posted date into ISO YYYY-MM-DD if possible
+	job["posted_date"] = parse_posted_date(posted_raw)
 	desc_html = row.get(mapping.get("job_description_html", ""), "")
 	job["job_description"] = clean_html_description(desc_html)
 
-	# Normalise obviously invalid/placeholder locations to "N/A"
+	# Normalise obviously invalid/placeholder locations to null
 	if not location_raw or re.fullmatch(
 		r"(?i)\s*(see\s+job\s+desc\.?|see\s+job\s+description\.?|n/?a|na)\s*", location_raw
 	):
-		location_raw = "N/A"
+		location_value: Optional[str] = None
+	else:
+		location_value = location_raw
 
-	job["location"] = location_raw
+	job["location"] = location_value
 	# Use explicit salary column if present and not just "Competitive", otherwise infer from description
 	salary_raw = row.get(mapping.get("salary", ""), "").strip()
 	if salary_raw and not re.search(r"\bcompetitive\b", salary_raw, re.IGNORECASE):
@@ -267,8 +308,16 @@ def convert_csv_to_json(inpath: str, outpath: str) -> None:
 		fieldnames = reader.fieldnames or []
 		mapping = map_columns(fieldnames)
 		jobs = []
+		seen_urls = set()
 		for row in reader:
-			jobs.append(row_to_job(row, mapping))
+			job = row_to_job(row, mapping)
+			job_url = (job.get("job_url") or "").strip().lower()
+			if job_url:
+				if job_url in seen_urls:
+					# Skip duplicated entries by job_url
+					continue
+				seen_urls.add(job_url)
+			jobs.append(job)
 
 	with open(outpath, 'w', encoding='utf-8') as fo:
 		json.dump(jobs, fo, ensure_ascii=False, indent=2)
