@@ -82,29 +82,39 @@ def extract_salary_phrase(s: str) -> str:
 
 	# Look for sentences/fragments mentioning salary-related words
 	m = re.search(
-		r"(salary[^\.!\n]*|compensation[^\.!\n]*|package[^\.!\n]*|rate[^\.!\n]*|pay[^\.!\n]*):?\s*[^\.!\n]+",
+		r"(salary[^\.!\n]*|compensation[^\.!\n]*|package[^\.!\n]*|rate[^\.!\n]*|pay[^\.!\n]*|wage[^\.!\n]*|remuneration[^\.!\n]*):?\s*[^\.!\n]+",
 		text,
 		re.IGNORECASE,
 	)
 	if m:
 		return m.group(0).strip(" .")
 
-	# Look for a money range or value, optionally with unit
+	# Look for a money range or value with currency symbol or period indicator (more strict)
 	m2 = re.search(
-		r"[\$€£]?\s?\d[\d,]*(?:\.\d+)?k?(?:\s*[-–]\s*[\$€£]?\s?\d[\d,]*(?:\.\d+)?k?)?(?:\s*(?:USD|GBP|EUR))?(?:\s*(?:per\s*(?:hour|day|week|month|year)|/hr|/hour|/day|/week|/month|/year|hr|hourly))?",
+		r"[\$€£]\s?\d[\d,]*(?:\.\d+)?k?(?:\s*[-–]\s*[\$€£]?\s?\d[\d,]*(?:\.\d+)?k?)?(?:\s*(?:USD|GBP|EUR))?(?:\s*(?:per\s*(?:hour|day|week|month|year)|/hr|/hour|/day|/week|/month|/year|hr|hourly))?",
 		text,
 		re.IGNORECASE,
 	)
 	if m2:
 		return m2.group(0).strip(" .")
 
-	# Handle textual descriptors like "Competitive"
-	m3 = re.search(r"\b(competitive|doe)\b", text, re.IGNORECASE)
+	# Look for numbers with explicit period indicators (per hour/day/week/month/year)
+	m3 = re.search(
+		r"\d+[\d,]*(?:\.\d+)?k?\s*(?:per\s*(?:hour|day|week|month|year)|/hr|/hour|/day|/week|/month|/year|hr\b|hourly|daily|weekly|monthly|yearly)",
+		text,
+		re.IGNORECASE,
+	)
 	if m3:
-		return m3.group(1)
+		return m3.group(0).strip(" .")
 
-	# Fallback: return the original, but trimmed
-	return text
+	# Handle textual descriptors like "Competitive"
+	m4 = re.search(r"\b(competitive|doe)\b", text, re.IGNORECASE)
+	if m4:
+		return m4.group(1)
+
+	# Fallback: return empty string if we can't find clear salary indicators
+	# This prevents extracting numbers from tech names
+	return ""
 
 
 def parse_salary(s: Optional[str]) -> Dict[str, Any]:
@@ -121,8 +131,17 @@ def parse_salary(s: Optional[str]) -> Dict[str, Any]:
 		return out
 	orig = s.strip()
 	snippet = extract_salary_phrase(orig) or orig
-	out["display"] = snippet
 	text_lower = snippet.lower()
+
+	# Check for clear salary indicators - require at least one of: currency, period, or salary keywords
+	has_currency = bool(re.search(r"(\$|€|£|usd|gbp|eur)", snippet, re.IGNORECASE))
+	has_period = bool(re.search(r"(per\s*(?:hour|day|week|month|year)|/hr|/hour|/day|/week|/month|/year|hr\b|hourly|daily|weekly|monthly|yearly|annum|annual|\byr\b|\bpa\b)", text_lower))
+	has_salary_keywords = bool(re.search(r"\b(salary|compensation|package|rate|pay|wage|remuneration|base|bonus)\b", text_lower))
+
+	if not (has_currency or has_period or has_salary_keywords):
+		return out
+
+	out["display"] = snippet
 
 	# currency (normalized to 3-letter codes) + symbol
 	cur_match = re.search(r"(\$|€|£|usd|gbp|eur)", snippet, re.IGNORECASE)

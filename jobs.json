@@ -653,9 +653,9 @@
     "job_description": "We are looking for a skilled professional to join our team. You should have experience with Dynamics 365 Sales, Canvas Apps, TypeScript, Model-driven Apps. Role involves building solutions on the Microsoft Stack.",
     "location": "Remote",
     "salary": {
-      "display": "365",
-      "min_amount": 365,
-      "max_amount": 365,
+      "display": null,
+      "min_amount": null,
+      "max_amount": null,
       "currency_code": null,
       "currency_symbol": null,
       "period": null
@@ -1080,9 +1080,9 @@
     "job_description": "We are looking for a skilled professional to join our team. You should have experience with Dynamics 365 Sales, React, Business Central, Azure Functions, Dataverse. Role involves building solutions on the Microsoft Stack.",
     "location": "Texas",
     "salary": {
-      "display": "365",
-      "min_amount": 365,
-      "max_amount": 365,
+      "display": null,
+      "min_amount": null,
+      "max_amount": null,
       "currency_code": null,
       "currency_symbol": null,
       "period": null
@@ -2253,9 +2253,9 @@
     "job_description": "We are looking for a skilled professional to join our team. You should have experience with Canvas Apps, Business Central, Dynamics 365 Sales, Model-driven Apps, JavaScript. Role involves building solutions on the Microsoft Stack.",
     "location": "New York, NY",
     "salary": {
-      "display": "365",
-      "min_amount": 365,
-      "max_amount": 365,
+      "display": null,
+      "min_amount": null,
+      "max_amount": null,
       "currency_code": null,
       "currency_symbol": null,
       "period": null
